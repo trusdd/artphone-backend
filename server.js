@@ -9,10 +9,12 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Подключение к PostgreSQL (Render сам предоставит DATABASE_URL)
+// Подключение к PostgreSQL (Aiven)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: {
+    rejectUnauthorized: false // Важно для Aiven!
+  }
 });
 
 // Создаем таблицу пользователей
@@ -25,7 +27,7 @@ pool.query(`
     password VARCHAR(255) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )
-`);
+`).catch(err => console.error('Error creating table:', err));
 
 // Регистрация
 app.post('/api/auth/register', async (req, res) => {
@@ -56,24 +58,70 @@ app.post('/api/auth/register', async (req, res) => {
 
     res.status(201).json({ success: true, token, user });
   } catch (error) {
+    console.error('Register error:', error);
     res.status(500).json({ error: 'Ошибка сервера' });
   }
 });
 
 // Вход
 app.post('/api/auth/login', async (req, res) => {
-  const { email, password } = req.body;
-  
-  const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-  const user = result.rows[0];
-  
-  if (!user || !(await bcrypt.compare(password, user.password))) {
-    return res.status(401).json({ error: 'Неверный email или пароль' });
-  }
+  try {
+    const { email, password } = req.body;
+    
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    const user = result.rows[0];
+    
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(401).json({ error: 'Неверный email или пароль' });
+    }
 
-  const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
-  res.json({ success: true, token, user: { id: user.id, name: user.name, email: user.email, phone: user.phone } });
+    const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    res.json({ 
+      success: true, 
+      token, 
+      user: { 
+        id: user.id, 
+        name: user.name, 
+        email: user.email, 
+        phone: user.phone 
+      } 
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// Профиль
+app.get('/api/auth/profile', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Нет токена' });
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const result = await pool.query(
+      'SELECT id, name, email, phone, created_at FROM users WHERE id = $1',
+      [decoded.id]
+    );
+    const user = result.rows[0];
+    if (!user) return res.status(404).json({ error: 'Пользователь не найден' });
+    res.json({ user });
+  } catch (err) {
+    res.status(401).json({ error: 'Недействительный токен' });
+  }
+});
+
+// Выход
+app.post('/api/auth/logout', (req, res) => {
+  res.json({ success: true, message: 'Выход выполнен' });
+});
+
+// Проверка здоровья
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'OK', time: new Date().toISOString(), message: 'Сервер работает!' });
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`🚀 Сервер запущен на порту ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`🚀 Сервер запущен на порту ${PORT}`);
+});
